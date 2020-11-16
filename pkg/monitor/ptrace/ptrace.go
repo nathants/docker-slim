@@ -2,6 +2,7 @@ package ptrace
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -552,9 +553,10 @@ done:
 func (app *App) start() error {
 	log.Debug("ptrace.App.start")
 	var err error
+
 	app.cmd, err = launcher.Start(app.Cmd, app.Args, app.Dir, app.User, app.RunAsUser, true)
 	if err != nil {
-		log.Errorf("ptrace.App.start: cmd='%v' args='%+v' dir='%v' error=%v\n", 
+		log.Errorf("ptrace.App.start: cmd='%v' args='%+v' dir='%v' error=%v\n",
 			app.Cmd, app.Args, app.Dir, err)
 		return err
 	}
@@ -885,6 +887,7 @@ func (app *App) collect() {
 }
 
 func onSyscall(pid int, cstate *syscallState) error {
+
 	var regs syscall.PtraceRegs
 	if err := syscall.PtraceGetRegs(pid, &regs); err != nil {
 		return err
@@ -893,6 +896,45 @@ func onSyscall(pid int, cstate *syscallState) error {
 	cstate.callNum = system.CallNumber(regs)
 	cstate.expectReturn = true
 	cstate.gotCallNum = true
+
+	// syscall params: http://blog.rchapman.org/posts/Linux_System_Call_Table_for_x86_64/
+
+	// example usage:
+	// >> sudo rm -rf dist_linux/.docker-slim-state/ && ./scripts/src.build.quick.sh && ./dist_linux/docker-slim build --target archlinux:latest --http-probe=false --show-clogs --use-local-mounts --cmd "stat -f /etc/hosts" --continue-after 1 2>&1|grep '^!'|grep -e stat -e error
+	// ! fstat 3 /etc/ld.so.cache
+	// ! fstat 3 /usr/lib/libc-2.32.so
+	// ! fstat 3 /usr/lib/locale/locale-archive
+	// ! fstat 3 /usr/share/locale/locale.alias
+	// ! statfs 10 /etc/hosts
+	// ! error: statfs input/output error
+	// ! fstat 1 pipe:[2064330]
+
+	name := syscalls[int(cstate.callNum)]
+	if name == "fstat" {
+		fdpath := fmt.Sprintf("/proc/%d/fd/%d", pid, regs.Rdi)
+		path, err := os.Readlink(fdpath)
+		if err != nil {
+			fmt.Println("err:", err)
+		}
+		fmt.Println("!", name, regs.Rdi, path)
+	} else if name == "stat" || name == "statfs" {
+		buffer := make([]byte, 4096)
+		_, err := syscall.PtracePeekData(pid, uintptr(regs.Rdi), buffer)
+		size := 0
+		for i, b := range buffer {
+			if b == 0 {
+				size = i
+				break
+			}
+		}
+		fmt.Println("!", name, size, string(buffer[:size]))
+		if err != nil {
+			fmt.Println("! error:", name, err)
+		}
+	} else {
+		fmt.Println("!", name)
+	}
+
 	return nil
 }
 
